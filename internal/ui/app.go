@@ -185,9 +185,9 @@ func (m Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
-		case "tab":
+		case "tab", "d":
 			return m.switchTab(1)
-		case "shift+tab":
+		case "shift+tab", "a":
 			return m.switchTab(-1)
 		case "up", "k":
 			m.moveCursor(-1)
@@ -228,7 +228,7 @@ func (m Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.currentSource().Name() == "SSH" {
 				m.startNew()
 			}
-		case "d":
+		case "x":
 			if m.currentSource().Name() == "SSH" {
 				tab := m.tab()
 				if item := m.selectedItem(tab); item != nil && item.target != nil && item.target.Editable {
@@ -331,11 +331,11 @@ func (m Model) viewList() string {
 	}
 
 	b.WriteString("\n")
-	help := "enter: connect  /: search  tab: switch  r: refresh  q: quit"
+	help := "enter: connect  /: search  a/d: switch tab  r: refresh  q: quit"
 	if m.currentSource().Name() == "SSH" {
-		help = "enter: connect  /: search  e: edit  n: new  d: delete  tab: switch  r: refresh  q: quit"
+		help = "enter: connect  /: search  e: edit  n: new  x: delete  a/d: switch tab  r: refresh  q: quit"
 	} else if m.currentSource().Name() == "GKE" {
-		help = "enter: exec  /: search  s: shell  tab: switch  r: refresh  q: quit"
+		help = "enter: exec  /: search  s: shell  a/d: switch tab  r: refresh  q: quit"
 	}
 	b.WriteString(helpStyle.Render(help))
 
