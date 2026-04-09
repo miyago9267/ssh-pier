@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/miyago/ssh-pier/internal/config"
-	"github.com/miyago/ssh-pier/internal/ssh"
-	"github.com/miyago/ssh-pier/internal/ui"
+	"github.com/miyago9267/ssh-pier/internal/config"
+	"github.com/miyago9267/ssh-pier/internal/ssh"
+	"github.com/miyago9267/ssh-pier/internal/ui"
 )
 
 func main() {

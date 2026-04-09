@@ -1,4 +1,4 @@
-module github.com/miyago/ssh-pier
+module github.com/miyago9267/ssh-pier
 
 go 1.25.6
 

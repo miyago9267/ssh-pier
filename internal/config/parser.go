@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/miyago/ssh-pier/internal/model"
+	"github.com/miyago9267/ssh-pier/internal/model"
 )
 
 type Host = model.Host

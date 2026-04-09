@@ -7,7 +7,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/miyago/ssh-pier/internal/config"
+	"github.com/miyago9267/ssh-pier/internal/config"
 )
 
 type mode int
