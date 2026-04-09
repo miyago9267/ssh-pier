@@ -93,7 +93,7 @@ func gceListProjects() ([]string, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), gceCommandTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, gcloudPath, "projects", "list", "--format=json(projectId)").Output()
+	out, err := exec.CommandContext(ctx, gcloudPath, "projects", "list", "--format=json(projectId)", "--quiet").Output()
 	if err != nil {
 		return nil, err
 	}
@@ -118,6 +118,7 @@ func gceListInstances(project string) ([]Target, error) {
 	out, err := exec.CommandContext(ctx, gcloudPath, "compute", "instances", "list",
 		"--project", project,
 		"--format=json",
+		"--quiet",
 	).Output()
 	if err != nil {
 		return nil, err
