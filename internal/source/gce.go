@@ -16,14 +16,20 @@ const (
 	gceCommandTimeout = 15 * time.Second
 )
 
-type GCESource struct{}
+type GCESource struct {
+	Projects []string // if set, skip auto-discovery
+}
 
 func (g *GCESource) Name() string { return "GCE" }
 
 func (g *GCESource) Fetch() ([]Target, error) {
-	projects, err := gceListProjects()
-	if err != nil {
-		return nil, fmt.Errorf("list projects: %w", err)
+	projects := g.Projects
+	if len(projects) == 0 {
+		var err error
+		projects, err = gceListProjects()
+		if err != nil {
+			return nil, fmt.Errorf("list projects: %w", err)
+		}
 	}
 
 	type result struct {
@@ -86,10 +92,9 @@ type gceInstance struct {
 	MachineType string `json:"machineType"`
 }
 
-// systemProjectPrefixes are auto-created projects that never have VMs.
 var systemProjectPrefixes = []string{
-	"sys-",             // Firebase / system
-	"gen-lang-client-", // Vertex AI / Gemini
+	"sys-",
+	"gen-lang-client-",
 }
 
 func isSystemProject(id string) bool {

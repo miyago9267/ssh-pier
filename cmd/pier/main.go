@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/miyago9267/ssh-pier/internal/pierconfig"
 	"github.com/miyago9267/ssh-pier/internal/source"
 	"github.com/miyago9267/ssh-pier/internal/ui"
 )
@@ -17,15 +18,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	configPath := filepath.Join(home, ".ssh", "config")
+	cfg := pierconfig.Load(pierconfig.DefaultPath())
+	sshConfigPath := filepath.Join(home, ".ssh", "config")
 
-	sources := []source.Source{
-		&source.SSHSource{ConfigPath: configPath},
-		&source.GCESource{},
-		&source.GKESource{Shell: "/bin/sh"},
+	shell := cfg.GKE.Shell
+	if shell == "" {
+		shell = "/bin/sh"
 	}
 
-	model := ui.NewModel(sources, configPath)
+	sources := []source.Source{
+		&source.SSHSource{ConfigPath: sshConfigPath},
+		&source.GCESource{Projects: cfg.GCE.Projects},
+		&source.GKESource{Shell: shell},
+	}
+
+	model := ui.NewModel(sources, sshConfigPath)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	finalModel, err := p.Run()
