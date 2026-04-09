@@ -1,12 +1,19 @@
 package source
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"sync"
 	"syscall"
+	"time"
+)
+
+const (
+	gceMaxConcurrency = 3
+	gceCommandTimeout = 15 * time.Second
 )
 
 type GCESource struct{}
@@ -19,28 +26,30 @@ func (g *GCESource) Fetch() ([]Target, error) {
 		return nil, fmt.Errorf("list projects: %w", err)
 	}
 
-	// Fetch all projects concurrently
 	type result struct {
 		targets []Target
-		err     error
 	}
 	results := make([]result, len(projects))
 	var wg sync.WaitGroup
+	sem := make(chan struct{}, gceMaxConcurrency)
+
 	for i, p := range projects {
 		wg.Add(1)
 		go func(idx int, project string) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			vms, err := gceListInstances(project)
-			results[idx] = result{targets: vms, err: err}
+			if err == nil {
+				results[idx] = result{targets: vms}
+			}
 		}(i, p)
 	}
 	wg.Wait()
 
 	var targets []Target
 	for _, r := range results {
-		if r.err == nil {
-			targets = append(targets, r.targets...)
-		}
+		targets = append(targets, r.targets...)
 	}
 	return targets, nil
 }
@@ -82,7 +91,9 @@ func gceListProjects() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err := exec.Command(gcloudPath, "projects", "list", "--format=json(projectId)").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), gceCommandTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, gcloudPath, "projects", "list", "--format=json(projectId)").Output()
 	if err != nil {
 		return nil, err
 	}
@@ -102,8 +113,9 @@ func gceListInstances(project string) ([]Target, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err := exec.Command(
-		gcloudPath, "compute", "instances", "list",
+	ctx, cancel := context.WithTimeout(context.Background(), gceCommandTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, gcloudPath, "compute", "instances", "list",
 		"--project", project,
 		"--format=json",
 	).Output()
