@@ -6,8 +6,7 @@ import (
 	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/miyago9267/ssh-pier/internal/config"
-	"github.com/miyago9267/ssh-pier/internal/ssh"
+	"github.com/miyago9267/ssh-pier/internal/source"
 	"github.com/miyago9267/ssh-pier/internal/ui"
 )
 
@@ -19,13 +18,14 @@ func main() {
 	}
 
 	configPath := filepath.Join(home, ".ssh", "config")
-	hosts, err := config.ParseFile(configPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "cannot read %s: %v\n", configPath, err)
-		os.Exit(1)
+
+	sources := []source.Source{
+		&source.SSHSource{ConfigPath: configPath},
+		&source.GCESource{},
+		&source.GKESource{Shell: "/bin/sh"},
 	}
 
-	model := ui.NewModel(hosts, configPath)
+	model := ui.NewModel(sources, configPath)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	finalModel, err := p.Run()
@@ -34,12 +34,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// If user selected a host to connect, exec ssh
 	m := finalModel.(ui.Model)
-	if alias := m.ConnectAlias(); alias != "" {
-		fmt.Printf("Connecting to %s...\n", alias)
-		if err := ssh.Connect(alias); err != nil {
-			fmt.Fprintf(os.Stderr, "ssh error: %v\n", err)
+	s, t := m.ConnectResult()
+	if s != nil && t != nil {
+		fmt.Printf("Connecting to %s (%s)...\n", t.Alias, s.Name())
+		if err := s.Connect(*t); err != nil {
+			fmt.Fprintf(os.Stderr, "connect error: %v\n", err)
 			os.Exit(1)
 		}
 	}

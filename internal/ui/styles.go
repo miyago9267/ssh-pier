@@ -41,4 +41,14 @@ var (
 
 	statusStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("82"))
+
+	activeTabStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("229")).
+			Background(lipgloss.Color("57")).
+			Padding(0, 1)
+
+	inactiveTabStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("243")).
+				Padding(0, 1)
 )

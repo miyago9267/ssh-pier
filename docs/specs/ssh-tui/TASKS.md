@@ -1,29 +1,39 @@
-# SSH TUI -- Tasks (Batch 1: MVP)
+# Pier -- Tasks
 
-## Phase 1: Project Setup + Config Parser
+## Batch 1: MVP (done)
 
-- [x] Go module init, 安裝 dependencies
-- [x] SSH config parser（讀取 Host、Hostname、User、Port、IdentityFile）
-- [x] `# @group:` 註解解析
-- [x] Parser unit tests
+- [x] SSH config parser + writer + tests
+- [x] Bubble Tea TUI (list/search/edit/delete)
+- [x] exec ssh connect
+- [x] CI/CD + Release v0.1.1
 
-## Phase 2: TUI Core
+## Batch 2: Multi-Source (done)
 
-- [x] Bubble Tea app skeleton（init/update/view）
-- [x] Host list view（顯示 alias、IP、user、group）
-- [x] 群組展開/收合
-- [x] Keybinding：Enter 連線、`/` 搜尋、`e` 編輯、`n` 新增、`d` 刪除、`q` 退出
+### Phase 2: Source 抽象層
 
-## Phase 3: SSH Connection
+- [x] 定義 Source interface + Target struct
+- [x] 重構 SSH 為 Source 實作
+- [x] 重構 UI 使用 Target 而非 Host
+- [x] 確認既有測試不壞
 
-- [x] `exec ssh <alias>` 連線
-- [ ] Auth fallback: key -> keychain -> manual (exec ssh 自帶 key/keychain, manual fallback OK)
-- [x] 連線前顯示確認資訊
+### Phase 3: Tab UI
 
-## Phase 4: Search + Edit
+- [x] Tab bar (SSH / GCE / GKE)
+- [x] Tab 切換 keybinding (Tab / Shift+Tab)
+- [x] 每個 tab 獨立的 list state (cursor, collapsed, search)
 
-- [x] Fuzzy search overlay
-- [x] Edit mode（修改 Host 欄位）
-- [x] New host form
-- [x] Delete host（確認 prompt）
-- [x] 寫回 `~/.ssh/config`（備份 + 保留格式）
+### Phase 4: GCE Source
+
+- [x] `gcloud projects list` fetch all projects
+- [x] `gcloud compute instances list` fetch VMs per project
+- [x] GCE Target mapping (alias=vm name, group=project)
+- [x] `exec gcloud compute ssh` connect
+- [x] Refresh (`r`)
+
+### Phase 5: GKE Source
+
+- [x] `kubectl get pods -A -o json` fetch pods (current context)
+- [x] GKE Target mapping (alias=pod name, group=namespace)
+- [x] `exec kubectl exec -it` connect (default /bin/sh)
+- [x] Shell override (`s` key)
+- [x] Refresh (`r`)

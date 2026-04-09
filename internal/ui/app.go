@@ -6,8 +6,8 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/miyago9267/ssh-pier/internal/config"
+	"github.com/miyago9267/ssh-pier/internal/source"
 )
 
 type mode int
@@ -18,62 +18,100 @@ const (
 	modeEdit
 	modeNew
 	modeConfirmDelete
+	modeShellInput
 )
 
+// tabState holds per-tab list state.
+type tabState struct {
+	targets   []source.Target
+	cursor    int
+	flatItems []listItem
+	collapsed map[string]bool
+	fetched   bool
+}
+
 type Model struct {
-	hosts      []config.Host
+	sources    []source.Source
 	configPath string
 
-	// List state
-	cursor     int
-	flatItems  []listItem // flattened view (groups + hosts)
-	collapsed  map[string]bool
+	// Tab
+	activeTab int
+	tabs      []tabState
 
 	// Search
 	searchInput textinput.Model
 	searchQuery string
 
-	// Edit / New
+	// Edit / New (SSH only)
 	editFields []textinput.Model
 	editCursor int
-	editHost   *config.Host // nil = new host
+	editTarget *source.Target
+
+	// Shell input (GKE only)
+	shellInput textinput.Model
 
 	// UI state
-	mode    mode
-	width   int
-	height  int
-	status  string
+	mode   mode
+	width  int
+	height int
+	status string
 
-	// Connection
-	connectAlias string
+	// Connection result
+	connectSource source.Source
+	connectTarget *source.Target
 }
 
 type listItem struct {
 	isGroup bool
 	group   string
-	host    *config.Host
+	target  *source.Target
 }
 
-func NewModel(hosts []config.Host, configPath string) Model {
+// fetchDoneMsg signals that a source fetch completed.
+type fetchDoneMsg struct {
+	tabIdx  int
+	targets []source.Target
+	err     error
+}
+
+func NewModel(sources []source.Source, configPath string) Model {
 	si := textinput.New()
-	si.Placeholder = "Search hosts..."
+	si.Placeholder = "Search..."
 	si.CharLimit = 64
 
-	m := Model{
-		hosts:      hosts,
-		configPath: configPath,
-		collapsed:  make(map[string]bool),
-		searchInput: si,
+	shi := textinput.New()
+	shi.Placeholder = "/bin/sh"
+	shi.CharLimit = 64
+
+	tabs := make([]tabState, len(sources))
+	for i := range tabs {
+		tabs[i].collapsed = make(map[string]bool)
 	}
-	m.rebuildList()
-	return m
+
+	return Model{
+		sources:     sources,
+		configPath:  configPath,
+		tabs:        tabs,
+		searchInput: si,
+		shellInput:  shi,
+	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return nil
+	// Fetch the first tab on startup
+	return m.fetchTab(0)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
+	case fetchDoneMsg:
+		return m.handleFetchDone(msg)
+	}
+
 	switch m.mode {
 	case modeSearch:
 		return m.updateSearch(msg)
@@ -81,6 +119,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateEdit(msg)
 	case modeConfirmDelete:
 		return m.updateConfirmDelete(msg)
+	case modeShellInput:
+		return m.updateShellInput(msg)
 	default:
 		return m.updateList(msg)
 	}
@@ -94,42 +134,80 @@ func (m Model) View() string {
 		return m.viewEdit()
 	case modeConfirmDelete:
 		return m.viewConfirmDelete()
+	case modeShellInput:
+		return m.viewShellInput()
 	default:
 		return m.viewList()
 	}
+}
+
+// --- Tab helpers ---
+
+func (m Model) tab() *tabState {
+	return &m.tabs[m.activeTab]
+}
+
+func (m Model) currentSource() source.Source {
+	return m.sources[m.activeTab]
+}
+
+func (m Model) fetchTab(idx int) tea.Cmd {
+	s := m.sources[idx]
+	return func() tea.Msg {
+		targets, err := s.Fetch()
+		return fetchDoneMsg{tabIdx: idx, targets: targets, err: err}
+	}
+}
+
+func (m Model) handleFetchDone(msg fetchDoneMsg) (tea.Model, tea.Cmd) {
+	if msg.tabIdx < 0 || msg.tabIdx >= len(m.tabs) {
+		return m, nil
+	}
+	tab := &m.tabs[msg.tabIdx]
+	tab.fetched = true
+	if msg.err != nil {
+		m.status = fmt.Sprintf("%s: %v", m.sources[msg.tabIdx].Name(), msg.err)
+		tab.targets = nil
+	} else {
+		tab.targets = msg.targets
+		m.status = fmt.Sprintf("%s: %d targets loaded", m.sources[msg.tabIdx].Name(), len(msg.targets))
+	}
+	m.rebuildList()
+	return m, nil
 }
 
 // --- List Mode ---
 
 func (m Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		return m, nil
-
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "tab":
+			return m.switchTab(1)
+		case "shift+tab":
+			return m.switchTab(-1)
 		case "up", "k":
 			m.moveCursor(-1)
 		case "down", "j":
 			m.moveCursor(1)
 		case "enter":
-			if item := m.selectedItem(); item != nil {
+			tab := m.tab()
+			if item := m.selectedItem(tab); item != nil {
 				if item.isGroup {
-					m.collapsed[item.group] = !m.collapsed[item.group]
+					tab.collapsed[item.group] = !tab.collapsed[item.group]
 					m.rebuildList()
-				} else if item.host != nil {
-					m.connectAlias = item.host.Alias
+				} else if item.target != nil {
+					m.connectSource = m.currentSource()
+					m.connectTarget = item.target
 					return m, tea.Quit
 				}
 			}
 		case " ":
-			// Toggle group with space too
-			if item := m.selectedItem(); item != nil && item.isGroup {
-				m.collapsed[item.group] = !m.collapsed[item.group]
+			tab := m.tab()
+			if item := m.selectedItem(tab); item != nil && item.isGroup {
+				tab.collapsed[item.group] = !tab.collapsed[item.group]
 				m.rebuildList()
 			}
 		case "/":
@@ -139,52 +217,92 @@ func (m Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.searchInput.SetValue("")
 			return m, textinput.Blink
 		case "e":
-			if item := m.selectedItem(); item != nil && item.host != nil {
-				m.startEdit(item.host)
+			if m.currentSource().Name() == "SSH" {
+				tab := m.tab()
+				if item := m.selectedItem(tab); item != nil && item.target != nil && item.target.Editable {
+					m.startEdit(item.target)
+				}
 			}
 		case "n":
-			m.startNew()
+			if m.currentSource().Name() == "SSH" {
+				m.startNew()
+			}
 		case "d":
-			if item := m.selectedItem(); item != nil && item.host != nil {
-				m.mode = modeConfirmDelete
+			if m.currentSource().Name() == "SSH" {
+				tab := m.tab()
+				if item := m.selectedItem(tab); item != nil && item.target != nil && item.target.Editable {
+					m.mode = modeConfirmDelete
+				}
+			}
+		case "r":
+			m.status = fmt.Sprintf("Refreshing %s...", m.currentSource().Name())
+			return m, m.fetchTab(m.activeTab)
+		case "s":
+			if m.currentSource().Name() == "GKE" {
+				m.mode = modeShellInput
+				m.shellInput.SetValue("/bin/sh")
+				m.shellInput.Focus()
+				return m, textinput.Blink
 			}
 		}
 	}
 	return m, nil
 }
 
+func (m Model) switchTab(delta int) (tea.Model, tea.Cmd) {
+	m.activeTab = (m.activeTab + delta + len(m.sources)) % len(m.sources)
+	m.searchQuery = ""
+	m.status = ""
+	tab := m.tab()
+	if !tab.fetched {
+		m.status = fmt.Sprintf("Loading %s...", m.currentSource().Name())
+		return m, m.fetchTab(m.activeTab)
+	}
+	m.rebuildList()
+	return m, nil
+}
+
 func (m Model) viewList() string {
 	var b strings.Builder
 
+	// Title + tabs
 	b.WriteString(titleStyle.Render("Pier"))
-	b.WriteString("\n")
+	b.WriteString("  ")
+	b.WriteString(m.renderTabs())
+	b.WriteString("\n\n")
 
-	for i, item := range m.flatItems {
-		selected := i == m.cursor
-		if item.isGroup {
-			arrow := "v"
-			if m.collapsed[item.group] {
-				arrow = ">"
-			}
-			line := fmt.Sprintf("%s %s", arrow, item.group)
-			if selected {
-				b.WriteString(selectedStyle.Render(line))
-			} else {
-				b.WriteString(groupStyle.Render(line))
-			}
-		} else {
-			h := item.host
-			line := fmt.Sprintf("  %s  %s@%s", h.Alias, h.User, h.Hostname)
-			if h.Port != "" && h.Port != "22" {
-				line += fmt.Sprintf(":%s", h.Port)
-			}
-			if selected {
-				b.WriteString(selectedStyle.Render(line))
-			} else {
-				b.WriteString(hostStyle.Render(line))
-			}
-		}
+	tab := m.tab()
+	if !tab.fetched {
+		b.WriteString(helpStyle.Render("Loading..."))
 		b.WriteString("\n")
+	} else if len(tab.flatItems) == 0 {
+		b.WriteString(helpStyle.Render("No targets found"))
+		b.WriteString("\n")
+	} else {
+		for i, item := range tab.flatItems {
+			selected := i == tab.cursor
+			if item.isGroup {
+				arrow := "v"
+				if tab.collapsed[item.group] {
+					arrow = ">"
+				}
+				line := fmt.Sprintf("%s %s", arrow, item.group)
+				if selected {
+					b.WriteString(selectedStyle.Render(line))
+				} else {
+					b.WriteString(groupStyle.Render(line))
+				}
+			} else {
+				t := item.target
+				line := fmt.Sprintf("  %s  %s", t.Alias, t.Detail)
+				if selected {
+					b.WriteString(selectedStyle.Render(line))
+				} else {
+					b.WriteString(hostStyle.Render(line))
+				}
+			}
+			b.WriteString("\n")
+		}
 	}
 
 	if m.status != "" {
@@ -193,9 +311,28 @@ func (m Model) viewList() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("enter: connect/toggle  /: search  e: edit  n: new  d: delete  q: quit"))
+	help := "enter: connect  /: search  tab: switch  r: refresh  q: quit"
+	if m.currentSource().Name() == "SSH" {
+		help = "enter: connect  /: search  e: edit  n: new  d: delete  tab: switch  r: refresh  q: quit"
+	} else if m.currentSource().Name() == "GKE" {
+		help = "enter: exec  /: search  s: shell  tab: switch  r: refresh  q: quit"
+	}
+	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
+}
+
+func (m Model) renderTabs() string {
+	var parts []string
+	for i, s := range m.sources {
+		name := s.Name()
+		if i == m.activeTab {
+			parts = append(parts, activeTabStyle.Render(name))
+		} else {
+			parts = append(parts, inactiveTabStyle.Render(name))
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // --- Search Mode ---
@@ -221,20 +358,24 @@ func (m Model) updateSearch(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.searchInput, cmd = m.searchInput.Update(msg)
 	m.searchQuery = m.searchInput.Value()
 	m.rebuildList()
-	m.cursor = 0
+	tab := m.tab()
+	tab.cursor = 0
 	return m, cmd
 }
 
 func (m Model) viewSearch() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Pier"))
-	b.WriteString("\n")
+	b.WriteString("  ")
+	b.WriteString(m.renderTabs())
+	b.WriteString("\n\n")
 	b.WriteString(searchStyle.Render("Search: "))
 	b.WriteString(m.searchInput.View())
 	b.WriteString("\n\n")
 
-	for i, item := range m.flatItems {
-		selected := i == m.cursor
+	tab := m.tab()
+	for i, item := range tab.flatItems {
+		selected := i == tab.cursor
 		if item.isGroup {
 			line := fmt.Sprintf("v %s", item.group)
 			if selected {
@@ -243,8 +384,8 @@ func (m Model) viewSearch() string {
 				b.WriteString(groupStyle.Render(line))
 			}
 		} else {
-			h := item.host
-			line := fmt.Sprintf("  %s  %s@%s", h.Alias, h.User, h.Hostname)
+			t := item.target
+			line := fmt.Sprintf("  %s  %s", t.Alias, t.Detail)
 			if selected {
 				b.WriteString(selectedStyle.Render(line))
 			} else {
@@ -256,25 +397,67 @@ func (m Model) viewSearch() string {
 
 	b.WriteString("\n")
 	b.WriteString(helpStyle.Render("enter: confirm  esc: cancel"))
-
 	return b.String()
 }
 
-// --- Edit Mode ---
+// --- Shell Input (GKE) ---
 
-func (m *Model) startEdit(h *config.Host) {
+func (m Model) updateShellInput(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "enter":
+			shell := m.shellInput.Value()
+			if shell == "" {
+				shell = "/bin/sh"
+			}
+			if gke, ok := m.currentSource().(*source.GKESource); ok {
+				gke.SetShell(shell)
+			}
+			m.status = fmt.Sprintf("Shell set to: %s", shell)
+			m.mode = modeList
+			m.shellInput.Blur()
+			return m, nil
+		case "esc":
+			m.mode = modeList
+			m.shellInput.Blur()
+			return m, nil
+		}
+	}
+
+	var cmd tea.Cmd
+	m.shellInput, cmd = m.shellInput.Update(msg)
+	return m, cmd
+}
+
+func (m Model) viewShellInput() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("Set Shell"))
+	b.WriteString("\n\n")
+	b.WriteString(detailLabelStyle.Render("Shell:"))
+	b.WriteString(m.shellInput.View())
+	b.WriteString("\n\n")
+	b.WriteString(helpStyle.Render("enter: confirm  esc: cancel"))
+	return b.String()
+}
+
+// --- Edit Mode (SSH only) ---
+
+func (m *Model) startEdit(t *source.Target) {
 	m.mode = modeEdit
-	m.editHost = h
+	m.editTarget = t
 	m.editCursor = 0
-	m.editFields = makeEditFields(h)
+	h := source.HostFromTarget(*t)
+	m.editFields = makeEditFields(&h)
 	m.editFields[0].Focus()
 }
 
 func (m *Model) startNew() {
 	m.mode = modeNew
-	m.editHost = nil
+	m.editTarget = nil
 	m.editCursor = 0
-	m.editFields = makeEditFields(&config.Host{Port: "22", Group: "ungrouped"})
+	h := config.Host{Port: "22", Group: "ungrouped"}
+	m.editFields = makeEditFields(&h)
 	m.editFields[0].Focus()
 }
 
@@ -335,24 +518,27 @@ func (m Model) saveEdit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if m.mode == modeEdit && m.editHost != nil {
-		// Remove old entry if alias changed
-		if m.editHost.Alias != h.Alias {
-			m.hosts = config.DeleteHost(m.hosts, m.editHost.Alias)
+	// Read current hosts from SSH source targets
+	tab := m.tab()
+	hosts := targetsToHosts(tab.targets)
+
+	if m.mode == modeEdit && m.editTarget != nil {
+		if m.editTarget.Alias != h.Alias {
+			hosts = config.DeleteHost(hosts, m.editTarget.Alias)
 		}
 	}
 
-	m.hosts = config.UpdateHost(m.hosts, h)
+	hosts = config.UpdateHost(hosts, h)
 
-	if err := config.WriteFile(m.configPath, m.hosts); err != nil {
+	if err := config.WriteFile(m.configPath, hosts); err != nil {
 		m.status = fmt.Sprintf("Write error: %v", err)
 	} else {
 		m.status = fmt.Sprintf("Saved: %s", h.Alias)
 	}
 
 	m.mode = modeList
-	m.rebuildList()
-	return m, nil
+	// Refresh SSH tab
+	return m, m.fetchTab(m.activeTab)
 }
 
 func (m Model) viewEdit() string {
@@ -363,7 +549,7 @@ func (m Model) viewEdit() string {
 		title = "New Host"
 	}
 	b.WriteString(titleStyle.Render(title))
-	b.WriteString("\n")
+	b.WriteString("\n\n")
 
 	labels := []string{"Alias", "Hostname", "User", "Port", "IdentityFile", "Group"}
 	for i, f := range m.editFields {
@@ -380,31 +566,29 @@ func (m Model) viewEdit() string {
 
 	b.WriteString("\n")
 	b.WriteString(helpStyle.Render("tab/shift+tab: navigate  enter: save  esc: cancel"))
-
 	return b.String()
 }
 
-// --- Confirm Delete ---
+// --- Confirm Delete (SSH only) ---
 
 func (m Model) updateConfirmDelete(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "y", "Y":
-			if item := m.selectedItem(); item != nil && item.host != nil {
-				alias := item.host.Alias
-				m.hosts = config.DeleteHost(m.hosts, alias)
-				if err := config.WriteFile(m.configPath, m.hosts); err != nil {
+			tab := m.tab()
+			if item := m.selectedItem(tab); item != nil && item.target != nil {
+				alias := item.target.Alias
+				hosts := targetsToHosts(tab.targets)
+				hosts = config.DeleteHost(hosts, alias)
+				if err := config.WriteFile(m.configPath, hosts); err != nil {
 					m.status = fmt.Sprintf("Write error: %v", err)
 				} else {
 					m.status = fmt.Sprintf("Deleted: %s", alias)
 				}
-				m.rebuildList()
-				if m.cursor >= len(m.flatItems) {
-					m.cursor = len(m.flatItems) - 1
-				}
 			}
 			m.mode = modeList
+			return m, m.fetchTab(m.activeTab)
 		case "n", "N", "esc":
 			m.mode = modeList
 		}
@@ -418,8 +602,9 @@ func (m Model) viewConfirmDelete() string {
 	b.WriteString("\n")
 
 	alias := ""
-	if item := m.selectedItem(); item != nil && item.host != nil {
-		alias = item.host.Alias
+	tab := m.tab()
+	if item := m.selectedItem(tab); item != nil && item.target != nil {
+		alias = item.target.Alias
 	}
 
 	b.WriteString(confirmStyle.Render(fmt.Sprintf("Delete %q? (y/N)", alias)))
@@ -429,61 +614,59 @@ func (m Model) viewConfirmDelete() string {
 // --- Helpers ---
 
 func (m *Model) rebuildList() {
-	filtered := m.hosts
+	tab := m.tab()
+	filtered := tab.targets
 	if m.searchQuery != "" {
-		filtered = config.FilterHosts(m.hosts, m.searchQuery)
+		filtered = source.FilterTargets(tab.targets, m.searchQuery)
 	}
 
-	groups := config.GroupHosts(filtered)
-	m.flatItems = nil
+	groups := source.GroupTargets(filtered)
+	tab.flatItems = nil
 
 	for _, g := range groups {
-		m.flatItems = append(m.flatItems, listItem{isGroup: true, group: g.Name})
-		if !m.collapsed[g.Name] {
-			for i := range g.Hosts {
-				m.flatItems = append(m.flatItems, listItem{host: &g.Hosts[i]})
+		tab.flatItems = append(tab.flatItems, listItem{isGroup: true, group: g.Name})
+		if !tab.collapsed[g.Name] {
+			for i := range g.Targets {
+				tab.flatItems = append(tab.flatItems, listItem{target: &g.Targets[i]})
 			}
 		}
 	}
 }
 
 func (m *Model) moveCursor(delta int) {
-	if len(m.flatItems) == 0 {
+	tab := m.tab()
+	if len(tab.flatItems) == 0 {
 		return
 	}
-	m.cursor += delta
-	if m.cursor < 0 {
-		m.cursor = 0
+	tab.cursor += delta
+	if tab.cursor < 0 {
+		tab.cursor = 0
 	}
-	if m.cursor >= len(m.flatItems) {
-		m.cursor = len(m.flatItems) - 1
+	if tab.cursor >= len(tab.flatItems) {
+		tab.cursor = len(tab.flatItems) - 1
 	}
 }
 
-func (m Model) selectedItem() *listItem {
-	if m.cursor < 0 || m.cursor >= len(m.flatItems) {
+func (m Model) selectedItem(tab *tabState) *listItem {
+	if tab.cursor < 0 || tab.cursor >= len(tab.flatItems) {
 		return nil
 	}
-	return &m.flatItems[m.cursor]
+	return &tab.flatItems[tab.cursor]
 }
 
-// ConnectAlias returns the alias to connect to (empty if none selected).
-func (m Model) ConnectAlias() string {
-	return m.connectAlias
+func targetsToHosts(targets []source.Target) []config.Host {
+	hosts := make([]config.Host, 0, len(targets))
+	for _, t := range targets {
+		if t.Source == "ssh" {
+			hosts = append(hosts, source.HostFromTarget(t))
+		}
+	}
+	return hosts
 }
 
-// Hosts returns the current host list.
-func (m Model) Hosts() []config.Host {
-	return m.hosts
+// ConnectResult returns the source and target to connect to after TUI exits.
+func (m Model) ConnectResult() (source.Source, *source.Target) {
+	return m.connectSource, m.connectTarget
 }
 
-// SetSize sets the terminal dimensions.
-func (m *Model) SetSize(w, h int) {
-	m.width = w
-	m.height = h
-}
-
-// ensure Model implements tea.Model
 var _ tea.Model = Model{}
-// lipgloss import used for styles
-var _ = lipgloss.NewStyle

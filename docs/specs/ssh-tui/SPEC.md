@@ -1,117 +1,173 @@
-# SSH TUI -- Spec
+# Pier -- Spec
 
 ## What
 
-Go + Bubble Tea 的 SSH 連線管理 TUI 工具。讀取 `~/.ssh/config`，提供分群、搜尋、編輯、一鍵連線功能。
+Go + Bubble Tea 的多來源連線管理 TUI。整合 SSH config、GCE VM、GKE Pod，一個介面管理所有遠端連線。
 
 ## Why
 
-SSH 連線散落在 config 裡，每次要記 alias 或 IP 很麻煩。需要一個視覺化介面快速選擇並連線。
+連線目標散落在 SSH config、GCP console、kubectl context 裡，每次要記 IP、zone、namespace 很麻煩。需要一個統一介面快速選擇並連線。
+
+## Architecture
+
+### Source 抽象
+
+```go
+type Target struct {
+    Source   string // "ssh" | "gce" | "gke"
+    Alias    string // 顯示名稱
+    Group    string // 分群用
+    Meta     map[string]string // source-specific 資訊
+    Editable bool
+}
+
+type Source interface {
+    Name() string
+    Fetch() ([]Target, error)
+    Connect(target Target) error
+}
+```
+
+### Source 清單
+
+| Source | Fetch 方式 | Connect 方式 | Group 邏輯 | Editable |
+|--------|-----------|-------------|-----------|----------|
+| ssh | parse `~/.ssh/config` | `exec ssh <alias>` | `# @group:` 註解 | Yes |
+| gce | `gcloud compute instances list --format=json` (all projects) | `exec gcloud compute ssh <vm> --zone <z> --project <p>` | 按 GCP project | No |
+| gke | `kubectl get pods -A -o json` (current context) | `exec kubectl exec -it <pod> -n <ns> -- <shell>` | 按 namespace | No |
+
+### TUI 分層
+
+最上層用 **tag** 切換 source type：
+
+```
+[SSH]  [GCE]  [GKE]
+```
+
+- `Tab` / `Shift+Tab` 切換 tag
+- 每個 tag 內按 group 展開/收合
+- SSH tag: group = `@group` 註解
+- GCE tag: group = GCP project name
+- GKE tag: group = namespace
 
 ## Core Features
 
-### F1: 讀取 ~/.ssh/config
+### F1: SSH Source (existing)
 
 - Parse `~/.ssh/config` 取得所有 Host 定義
 - 顯示：Host alias、Hostname (IP)、User、Port
 - 支援 wildcard host（`*`）作為 default 設定，不顯示在列表中
+- `# @group:` 註解分群
+- 可編輯、新增、刪除（寫回 config，自動備份 `.bak`）
 
-### F2: 分群 (Groups)
+### F2: GCE Source
 
-- 透過 SSH config 的註解標記群組：
-  ```
-  # @group: company
-  Host prod-server
-      Hostname 10.0.1.100
-      User deploy
+- 執行 `gcloud compute instances list --project <p> --format=json` 取得 VM 列表
+- 先用 `gcloud projects list --format=json` 取得所有 project
+- Alias = VM name
+- Group = project ID
+- Meta: zone, project, machine-type, status, internal/external IP
+- 只列 RUNNING 狀態的 VM
+- Connect: `exec gcloud compute ssh <vm-name> --zone <zone> --project <project>`
 
-  # @group: personal
-  Host my-vps
-      Hostname 203.0.113.50
-      User miyago
-  ```
-- 群組繼承：標記一次，後續 Host 自動歸入該群組，直到遇到下一個 `# @group:` 標記
-- 未標記的 Host 歸入 `ungrouped`
-- TUI 中可以按群組篩選或展開/收合
+### F3: GKE Source
 
-### F3: 一鍵連線
-
-- 選中 Host 後 Enter 直接連線
-- Auth fallback 順序：
-  1. SSH Key（IdentityFile 指定的 key）
-  2. macOS Keychain（透過 `security find-generic-password`）
-  3. 密碼（若 config 有自訂註解 `# @password: ...` 或未來接 password store）
-  4. 手動輸入（spawn interactive ssh）
-- 實際連線方式：`exec ssh <host-alias>`（取代當前 process，最大相容性）
+- 執行 `kubectl get pods -A -o json` (current context)
+- Alias = pod name
+- Group = namespace
+- Meta: namespace, node, status, containers, context
+- 只列 Running 狀態的 pod
+- Connect: `exec kubectl exec -it <pod> -n <namespace> -- /bin/sh`
+- 如果 pod 有多個 container，用 `-c <container>` 指定（預設第一個）
+- Shell 預設 `/bin/sh`，可在連線前按 `s` 指定
 
 ### F4: 搜尋
 
-- `/` 進入搜尋模式（fuzzy match Host alias、Hostname、User）
-- 即時過濾列表
+- `/` 進入搜尋模式（fuzzy match，作用於當前 tag 的 targets）
 
-### F5: 編輯連線
+### F5: 編輯（SSH only）
 
-- 選中 Host 後按 `e` 進入編輯模式
-- 可修改：Hostname、User、Port、IdentityFile、Group
-- 新增 Host：按 `n`
-- 刪除 Host：按 `d`（需確認）
-- 變更直接寫回 `~/.ssh/config`（寫入前備份為 `~/.ssh/config.bak`）
+- `e` 編輯、`n` 新增、`d` 刪除
+- GCE / GKE 為唯讀（雲端資源不從 TUI 改）
 
-## Architecture
+### F6: Refresh
+
+- `r` 重新 fetch 當前 tag 的 source
+- 顯示 loading spinner
+
+## Keybindings
+
+| Key | Action |
+|-----|--------|
+| `Tab` / `Shift+Tab` | 切換 tag (SSH/GCE/GKE) |
+| `j` / `k` | 上下移動 |
+| `Enter` | 連線 / 展開收合 group |
+| `Space` | 展開收合 group |
+| `/` | 搜尋 |
+| `e` | 編輯 (SSH only) |
+| `n` | 新增 (SSH only) |
+| `d` | 刪除 (SSH only) |
+| `r` | Refresh 當前 source |
+| `s` | 指定 shell (GKE only) |
+| `q` | 退出 |
+
+## Directory Structure
 
 ```
-ssh-tui/
+ssh-pier/
   cmd/
-    main.go              # entrypoint
+    pier/main.go
   internal/
+    source/
+      source.go          # Source interface, Target struct
+      ssh.go             # SSH config source
+      gce.go             # GCE source
+      gke.go             # GKE source
     config/
-      parser.go          # SSH config parser (with @group extension)
-      writer.go          # SSH config writer (preserve comments/format)
+      parser.go          # SSH config parser
+      writer.go          # SSH config writer
     model/
-      host.go            # Host struct, Group struct
+      host.go            # Host struct (SSH-specific, used by config/)
     ui/
-      app.go             # root Bubble Tea model
-      list.go            # host list view (with groups)
-      detail.go          # host detail / edit view
+      app.go             # root Bubble Tea model (with tabs)
+      list.go            # target list view (with groups)
+      edit.go            # edit view (SSH only)
       search.go          # search overlay
       styles.go          # Lip Gloss styles
-    ssh/
-      connect.go         # SSH connection handler (exec)
-      auth.go            # auth fallback chain
   go.mod
   go.sum
 ```
 
-## Key Dependencies
-
-- `github.com/charmbracelet/bubbletea` -- TUI framework
-- `github.com/charmbracelet/lipgloss` -- styling
-- `github.com/charmbracelet/bubbles` -- reusable components (list, textinput, viewport)
-- `github.com/sahilm/fuzzy` -- fuzzy search (bubbles/list 內建)
-
 ## ADR
 
-### ADR-1: 為什麼用 `exec ssh` 而非 Go SSH library
+### ADR-1: exec 外部 CLI 而非 library
 
-Go 的 `golang.org/x/crypto/ssh` 可以建立連線，但要自己處理 terminal resize、agent forwarding、ProxyJump 等。直接 `exec ssh` 讓系統的 ssh client 處理一切，最大相容性，零額外維護。
+SSH 用 `exec ssh`，GCE 用 `exec gcloud compute ssh`，GKE 用 `exec kubectl exec`。每個都直接呼叫使用者已認證的 CLI tool，不需要在 Pier 裡處理 auth、token、kubeconfig。最大相容性，零額外維護。
 
-### ADR-2: 為什麼用 config 註解做分群
+### ADR-2: GCE 列所有 project
 
-不引入額外 config 檔。`# @group:` 註解對 SSH 無害，使用者不用 TUI 時 config 照常運作。缺點是 parser 要保留註解格式。
+用 `gcloud projects list` 取得使用者有權限的所有 project，逐一 fetch VM。可能會慢（多 project 時），所以用 lazy fetch + refresh，不阻塞 TUI 啟動。
 
-### ADR-3: Password 不存 config
+### ADR-3: GKE 只列 current context
 
-`# @password:` 是明文，僅作為最低限度 fallback。正式密碼走 macOS Keychain 或 SSH key。未來可擴展接 1Password CLI / pass。
+多 cluster 切換太複雜，且 `kubectl config use-context` 是使用者自己的責任。Pier 只看 current context 的 pod。要切 cluster 的話使用者先在外面切 context 再 refresh。
 
-## Rabbit Holes (第一版避免)
+### ADR-4: GCE/GKE 唯讀
 
-- 不做 terminal multiplexer（tmux 整合之類的）
-- 不自己實作 SSH protocol
+雲端資源的 lifecycle 不該從 TUI 管理，只做「看 + 連」。
+
+## Rabbit Holes (避免)
+
+- 不做 terminal multiplexer（tmux 整合）
+- 不自己實作 SSH / K8s protocol
+- 不做 GCE/GKE 資源管理（start/stop VM、scale pod）
+- 不做多 kubeconfig / 多 context 切換
 
 ## 未來可擴展
 
-- SFTP / SCP / Rsync 檔案傳輸整合（同一 TUI 內操作）
+- SFTP / SCP / Rsync 檔案傳輸整合
 - SSH tunnel / port forwarding 管理
 - 連線歷史記錄
-- 多 config 檔支援
+- 多 kubeconfig context 切換
+- GKE: 選 container 的互動式 UI
 - Import from other tools (Termius, etc.)
