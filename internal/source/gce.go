@@ -86,6 +86,21 @@ type gceInstance struct {
 	MachineType string `json:"machineType"`
 }
 
+// systemProjectPrefixes are auto-created projects that never have VMs.
+var systemProjectPrefixes = []string{
+	"sys-",             // Firebase / system
+	"gen-lang-client-", // Vertex AI / Gemini
+}
+
+func isSystemProject(id string) bool {
+	for _, prefix := range systemProjectPrefixes {
+		if len(id) >= len(prefix) && id[:len(prefix)] == prefix {
+			return true
+		}
+	}
+	return false
+}
+
 func gceListProjects() ([]string, error) {
 	gcloudPath, err := findCLI("gcloud")
 	if err != nil {
@@ -101,9 +116,11 @@ func gceListProjects() ([]string, error) {
 	if err := json.Unmarshal(out, &projects); err != nil {
 		return nil, err
 	}
-	ids := make([]string, len(projects))
-	for i, p := range projects {
-		ids[i] = p.ProjectID
+	var ids []string
+	for _, p := range projects {
+		if !isSystemProject(p.ProjectID) {
+			ids = append(ids, p.ProjectID)
+		}
 	}
 	return ids, nil
 }
