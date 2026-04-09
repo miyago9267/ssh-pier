@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sync"
 	"syscall"
 )
 
@@ -18,19 +19,34 @@ func (g *GCESource) Fetch() ([]Target, error) {
 		return nil, fmt.Errorf("list projects: %w", err)
 	}
 
+	// Fetch all projects concurrently
+	type result struct {
+		targets []Target
+		err     error
+	}
+	results := make([]result, len(projects))
+	var wg sync.WaitGroup
+	for i, p := range projects {
+		wg.Add(1)
+		go func(idx int, project string) {
+			defer wg.Done()
+			vms, err := gceListInstances(project)
+			results[idx] = result{targets: vms, err: err}
+		}(i, p)
+	}
+	wg.Wait()
+
 	var targets []Target
-	for _, p := range projects {
-		vms, err := gceListInstances(p)
-		if err != nil {
-			continue // skip projects we can't access
+	for _, r := range results {
+		if r.err == nil {
+			targets = append(targets, r.targets...)
 		}
-		targets = append(targets, vms...)
 	}
 	return targets, nil
 }
 
 func (g *GCESource) Connect(t Target) error {
-	gcloudPath, err := exec.LookPath("gcloud")
+	gcloudPath, err := findCLI("gcloud")
 	if err != nil {
 		return fmt.Errorf("gcloud not found: %w", err)
 	}
@@ -49,11 +65,11 @@ type gceProject struct {
 }
 
 type gceInstance struct {
-	Name   string `json:"name"`
-	Zone   string `json:"zone"`
-	Status string `json:"status"`
+	Name              string `json:"name"`
+	Zone              string `json:"zone"`
+	Status            string `json:"status"`
 	NetworkInterfaces []struct {
-		NetworkIP    string `json:"networkIP"`
+		NetworkIP     string `json:"networkIP"`
 		AccessConfigs []struct {
 			NatIP string `json:"natIP"`
 		} `json:"accessConfigs"`
@@ -62,7 +78,11 @@ type gceInstance struct {
 }
 
 func gceListProjects() ([]string, error) {
-	out, err := exec.Command("gcloud", "projects", "list", "--format=json(projectId)").Output()
+	gcloudPath, err := findCLI("gcloud")
+	if err != nil {
+		return nil, err
+	}
+	out, err := exec.Command(gcloudPath, "projects", "list", "--format=json(projectId)").Output()
 	if err != nil {
 		return nil, err
 	}
@@ -78,8 +98,12 @@ func gceListProjects() ([]string, error) {
 }
 
 func gceListInstances(project string) ([]Target, error) {
+	gcloudPath, err := findCLI("gcloud")
+	if err != nil {
+		return nil, err
+	}
 	out, err := exec.Command(
-		"gcloud", "compute", "instances", "list",
+		gcloudPath, "compute", "instances", "list",
 		"--project", project,
 		"--format=json",
 	).Output()
@@ -98,19 +122,16 @@ func gceListInstances(project string) ([]Target, error) {
 			continue
 		}
 
-		// Extract zone short name from full URL
 		zone := inst.Zone
 		if idx := lastIndex(zone, '/'); idx != -1 {
 			zone = zone[idx+1:]
 		}
 
-		// Extract machine type short name
 		machineType := inst.MachineType
 		if idx := lastIndex(machineType, '/'); idx != -1 {
 			machineType = machineType[idx+1:]
 		}
 
-		// Get IPs
 		var internalIP, externalIP string
 		if len(inst.NetworkInterfaces) > 0 {
 			internalIP = inst.NetworkInterfaces[0].NetworkIP

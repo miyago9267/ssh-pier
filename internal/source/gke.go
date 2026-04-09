@@ -15,7 +15,11 @@ type GKESource struct {
 func (g *GKESource) Name() string { return "GKE" }
 
 func (g *GKESource) Fetch() ([]Target, error) {
-	out, err := exec.Command("kubectl", "get", "pods", "-A", "-o", "json").Output()
+	kubectlPath, err := findCLI("kubectl")
+	if err != nil {
+		return nil, fmt.Errorf("kubectl not found: %w", err)
+	}
+	out, err := exec.Command(kubectlPath, "get", "pods", "-A", "-o", "json").Output()
 	if err != nil {
 		return nil, fmt.Errorf("kubectl get pods: %w", err)
 	}
@@ -60,7 +64,7 @@ func (g *GKESource) Fetch() ([]Target, error) {
 }
 
 func (g *GKESource) Connect(t Target) error {
-	kubectlPath, err := exec.LookPath("kubectl")
+	kubectlPath, err := findCLI("kubectl")
 	if err != nil {
 		return fmt.Errorf("kubectl not found: %w", err)
 	}

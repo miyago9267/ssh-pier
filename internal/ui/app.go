@@ -23,11 +23,12 @@ const (
 
 // tabState holds per-tab list state.
 type tabState struct {
-	targets   []source.Target
-	cursor    int
-	flatItems []listItem
-	collapsed map[string]bool
-	fetched   bool
+	targets      []source.Target
+	cursor       int
+	scrollOffset int
+	flatItems    []listItem
+	collapsed    map[string]bool
+	fetched      bool
 }
 
 type Model struct {
@@ -279,7 +280,20 @@ func (m Model) viewList() string {
 		b.WriteString(helpStyle.Render("No targets found"))
 		b.WriteString("\n")
 	} else {
-		for i, item := range tab.flatItems {
+		vh := m.listViewHeight()
+		end := tab.scrollOffset + vh
+		if end > len(tab.flatItems) {
+			end = len(tab.flatItems)
+		}
+
+		// Scroll indicator (top)
+		if tab.scrollOffset > 0 {
+			b.WriteString(helpStyle.Render(fmt.Sprintf("  ... %d more above", tab.scrollOffset)))
+			b.WriteString("\n")
+		}
+
+		for i := tab.scrollOffset; i < end; i++ {
+			item := tab.flatItems[i]
 			selected := i == tab.cursor
 			if item.isGroup {
 				arrow := "v"
@@ -301,6 +315,12 @@ func (m Model) viewList() string {
 					b.WriteString(hostStyle.Render(line))
 				}
 			}
+			b.WriteString("\n")
+		}
+
+		// Scroll indicator (bottom)
+		if end < len(tab.flatItems) {
+			b.WriteString(helpStyle.Render(fmt.Sprintf("  ... %d more below", len(tab.flatItems)-end)))
 			b.WriteString("\n")
 		}
 	}
@@ -360,6 +380,7 @@ func (m Model) updateSearch(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.rebuildList()
 	tab := m.tab()
 	tab.cursor = 0
+	tab.scrollOffset = 0
 	return m, cmd
 }
 
@@ -374,7 +395,13 @@ func (m Model) viewSearch() string {
 	b.WriteString("\n\n")
 
 	tab := m.tab()
-	for i, item := range tab.flatItems {
+	vh := m.listViewHeight() - 2 // extra lines for search input
+	end := tab.scrollOffset + vh
+	if end > len(tab.flatItems) {
+		end = len(tab.flatItems)
+	}
+	for i := tab.scrollOffset; i < end; i++ {
+		item := tab.flatItems[i]
 		selected := i == tab.cursor
 		if item.isGroup {
 			line := fmt.Sprintf("v %s", item.group)
@@ -645,6 +672,28 @@ func (m *Model) moveCursor(delta int) {
 	if tab.cursor >= len(tab.flatItems) {
 		tab.cursor = len(tab.flatItems) - 1
 	}
+
+	// Adjust scroll to keep cursor visible
+	vh := m.listViewHeight()
+	if vh <= 0 {
+		return
+	}
+	if tab.cursor < tab.scrollOffset {
+		tab.scrollOffset = tab.cursor
+	}
+	if tab.cursor >= tab.scrollOffset+vh {
+		tab.scrollOffset = tab.cursor - vh + 1
+	}
+}
+
+// listViewHeight returns how many list rows fit on screen.
+// Reserve lines for: title+tabs(2) + status(2) + help(2) = 6
+func (m Model) listViewHeight() int {
+	h := m.height - 6
+	if h < 1 {
+		h = 20 // fallback before first WindowSizeMsg
+	}
+	return h
 }
 
 func (m Model) selectedItem(tab *tabState) *listItem {
